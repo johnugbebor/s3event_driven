@@ -1,0 +1,90 @@
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  terraform:
+    name: Terraform Plan & Apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Set up AWS CLI
+        run: |
+          aws sts assume-role \
+            --role-arn arn:aws:iam:
+            --role-session-name GitHubActionsSession \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text > credentials.txt
+
+          export AWS_ACCESS_KEY_ID=$(awk '{print $1}' credentials.txt)
+          export AWS_SECRET_ACCESS_KEY=$(awk '{print $2}' credentials.txt)
+          export AWS_SESSION_TOKEN=$(awk '{print $3}' credentials.txt)
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.3.0
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+  lambda_deploy:
+    name: Deploy Lambda Function
+    runs-on: ubuntu-latest
+    needs: terraform
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Set up AWS CLI (Assume Role)
+        run: |
+          aws sts assume-role \
+            --role-arn arn:aws:iam::<account-id>:role/<role-name> \
+            --role-session-name GitHubActionsLambdaSession \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text > credentials.txt
+
+          export AWS_ACCESS_KEY_ID=$(awk '{print $1}' credentials.txt)
+          export AWS_SECRET_ACCESS_KEY=$(awk '{print $2}' credentials.txt)
+          export AWS_SESSION_TOKEN=$(awk '{print $3}' credentials.txt)
+
+      - name: Package Lambda Function
+        run: |
+          zip -r lambda_function.zip lambda/
+
+      - name: Upload Lambda to S3
+        run: |
+          aws s3 cp lambda_function.zip s3://$BUCKET_NAME/lambda_function.zip
+
+      - name: Update Lambda Function
+        run: |
+          aws lambda update-function-code --function-name exif-removal-lambda --s3-bucket $BUCKET_NAME --s3-key lambda_function.zip
+
+  test:
+    name: Test Lambda Function
+    runs-on: ubuntu-latest
+    needs: lambda_deploy
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Test Lambda Deployment
+        run: |
+          aws lambda invoke --function-name exif-removal-lambda output.txt
+          cat output.txt
